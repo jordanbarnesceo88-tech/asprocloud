@@ -1,0 +1,4 @@
+aspro_recon.json
+__pycache__/
+*.pyc
+.env
