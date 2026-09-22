@@ -215,32 +215,66 @@ def step_business_lines(tok, apply):
 def sync_stages(tok, module, entity, parent_field, parent_id, wanted, apply):
     """Приводит набор стадий к желаемому, ничего не удаляя.
 
-    Существующие переименовывает по порядку, недостающие создаёт,
-    лишние гасит (active=0)."""
+    Сначала ищет стадию по названию — уже правильную не трогает, только
+    выправляет порядок. Оставшиеся без пары существующие записи
+    переиспользует под недостающие названия, затем создаёт нехватку,
+    затем гасит лишние (active=0).
+
+    Сопоставление по названию, а не по позиции: иначе повторный запуск
+    на частично настроенном наборе сдвигает стадии и плодит дубли."""
     existing = listing(tok, module, entity, **{"filter[{}]".format(parent_field): parent_id})
     if existing is None:
         existing = []
     existing.sort(key=lambda i: (int(i.get("ordering") or 0), int(i.get("id") or 0)))
 
-    for n, name in enumerate(wanted):
-        if n < len(existing):
-            cur = existing[n]
-            if str(cur.get("name", "")).strip() == name:
-                print("    = {:<32} уже на месте (id {})".format(name, cur.get("id")))
-            else:
-                update(tok, module, entity, cur.get("id"),
-                       {"name": name, "ordering": n + 1, "active": 1},
-                       "{} <- {}".format(name, cur.get("name")), apply, indent="    ")
-        else:
-            payload = {"name": name, "ordering": n + 1, "active": 1,
-                       parent_field: parent_id}
-            if entity == "stages" and module == "st":
-                payload["fullname"] = name
-            create(tok, module, entity, payload, name, apply, indent="    ")
+    by_name = {}
+    for rec in existing:
+        by_name.setdefault(str(rec.get("name", "")).strip(), rec)
 
-    for extra in existing[len(wanted):]:
-        update(tok, module, entity, extra.get("id"), {"active": 0},
-               "погасить «{}»".format(extra.get("name")), apply, indent="    ")
+    used = set()
+
+    def take_spare():
+        for rec in existing:
+            if str(rec.get("id")) not in used:
+                return rec
+        return None
+
+    for n, name in enumerate(wanted, start=1):
+        rec = by_name.get(name)
+        if rec is not None and str(rec.get("id")) not in used:
+            used.add(str(rec.get("id")))
+            right_order = int(rec.get("ordering") or 0) == n
+            right_active = str(rec.get("active", 1)) in ("1", "True", "true")
+            if right_order and right_active:
+                print("    = {:<32} уже на месте (id {})".format(name, rec.get("id")))
+            else:
+                update(tok, module, entity, rec.get("id"),
+                       {"name": name, "ordering": n, "active": 1},
+                       "{} — порядок {}".format(name, n), apply, indent="    ")
+            continue
+
+        spare = take_spare()
+        if spare is not None:
+            used.add(str(spare.get("id")))
+            update(tok, module, entity, spare.get("id"),
+                   {"name": name, "ordering": n, "active": 1},
+                   "{} <- {}".format(name, spare.get("name")), apply, indent="    ")
+            continue
+
+        payload = {"name": name, "ordering": n, "active": 1, parent_field: parent_id}
+        if entity == "stages" and module == "st":
+            payload["fullname"] = name
+        new_id = create(tok, module, entity, payload, name, apply, indent="    ")
+        if new_id is not None:
+            used.add(str(new_id))
+
+    for rec in existing:
+        if str(rec.get("id")) in used:
+            continue
+        if str(rec.get("active", 1)) in ("0", "False", "false"):
+            continue
+        update(tok, module, entity, rec.get("id"), {"active": 0},
+               "погасить «{}»".format(rec.get("name")), apply, indent="    ")
 
 
 def step_pipelines(tok, apply):
