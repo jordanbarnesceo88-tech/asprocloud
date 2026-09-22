@@ -35,6 +35,7 @@ STATE_FILE = os.path.join(HERE, "aspro_cycle_state.json")
 PAUSE = 1.1
 TIMEOUT = 30
 
+VERSION = "3 — 22.09, поиск виноватого поля"
 MARK = "ПРОВЕРКА ЦИКЛА"          # метка тестовых записей
 TODAY = datetime.date.today()
 SUM_NET = 100000.0               # сумма без налога, для наглядности
@@ -141,13 +142,24 @@ class Run:
             body = call(tok, module, entity, "create", data=minimal)
             bad2 = problem(body)
             if not bad2:
-                extra = sorted(set(payload) - set(minimal))
                 new_id = (body.get("response") or {}).get("id")
                 self.created.append([module, entity, new_id, what])
-                self.note(step + " (урезанный)", "ОК",
-                          "id {} — мешало одно из: {}".format(new_id, ", ".join(extra)))
-                return new_id
+                self.note(step + " (урезанный)", "ОК", "id {}".format(new_id))
+                call(tok, module, entity, "delete/{}".format(new_id))
+                self.created.pop()
+                culprit = isolate_field(tok, module, entity, payload, minimal, self)
+                body = call(tok, module, entity, "create",
+                            data={k: v for k, v in payload.items() if k != culprit}
+                            if culprit else minimal)
+                if problem(body) is None:
+                    new_id = (body.get("response") or {}).get("id")
+                    self.created.append([module, entity, new_id, what])
+                    self.note(step + " (без «{}»)".format(culprit or "лишних полей"),
+                              "ОК", "id {}".format(new_id))
+                    return new_id
+                return None
             self.note(step + " (урезанный)", "ОШИБКА", bad2)
+            print("    даже минимальный набор отвергнут — дело не в лишних полях")
             return None
         if bad:
             self.note(step, "ОШИБКА", bad)
@@ -180,6 +192,29 @@ class Run:
         else:
             print("  Пройдено {}, сломалось {}. Разрывы видны выше.".format(ok, bad))
             print("  Эти шаги в реальных сделках придётся делать руками.")
+
+
+def isolate_field(tok, module, entity, payload, minimal, run):
+    """Ищет поле, из-за которого запрос не проходит валидацию.
+
+    От полного набора по одному убирает необязательные поля. Как только
+    запрос прошёл — убранное поле и есть виновник. Удачные пробы сразу
+    удаляются, чтобы не оставлять мусор."""
+    optional = [k for k in payload if k not in minimal]
+    if not optional:
+        return None
+    print("    поиск виноватого поля среди {} необязательных…".format(len(optional)))
+    for field in optional:
+        trial = {k: v for k, v in payload.items() if k != field}
+        body = call(tok, module, entity, "create", data=trial)
+        if problem(body) is None:
+            rec_id = (body.get("response") or {}).get("id")
+            call(tok, module, entity, "delete/{}".format(rec_id))
+            print("      без «{}» запрос проходит — дело в нём".format(field))
+            return field
+        print("      без «{}» — всё равно отказ".format(field))
+    print("      ни одно поле по отдельности не виновато: мешает сочетание")
+    return None
 
 
 # ─────────────────────────────────────────────────────────────── цикл
@@ -231,12 +266,17 @@ def run_cycle(tok, me_id, org_id, run):
 
     # 2a. Привязка сделки к контрагенту
     if run.apply and lead_id and account_id:
-        body = call(tok, "crm", "lead_accounts", "create",
-                    data={"lead_id": lead_id, "account_id": account_id,
-                          "account_type": 1})
+        payload = {"lead_id": lead_id, "account_id": account_id, "account_type": 1}
+        body = call(tok, "crm", "lead_accounts", "create", data=payload)
         bad = problem(body)
         if bad:
-            run.note("2a. Сделка ↔ контрагент", "ОШИБКА", bad)
+            run.note("2a. Сделка ↔ контрагент", "ОШИБКА",
+                     "{} — пробую маршрут связанных сущностей".format(bad))
+            body = call(tok, "crm", "lead/{}/lead_accounts".format(lead_id), "create",
+                        data={"account_id": account_id, "account_type": 1})
+            bad = problem(body)
+        if bad:
+            run.note("2a. Сделка ↔ контрагент (связь)", "ОШИБКА", bad)
         else:
             rid = (body.get("response") or {}).get("id")
             run.created.append(["crm", "lead_accounts", rid, "связь сделки и контрагента"])
@@ -405,6 +445,7 @@ def main():
         print("Организация «Норд Лайн» не найдена ({}), беру id 1".format(org_err))
         org_id = 1
 
+    print("Версия  : {}".format(VERSION))
     print("Аккаунт : {}".format(API_BASE))
     print("От имени: {} (id {})".format(me.get("name") or me.get("username"), me_id))
     print("Режим   : {}".format(
