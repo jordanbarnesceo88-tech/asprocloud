@@ -1,5 +1,6 @@
 aspro_recon.json
 aspro_report.json
+aspro_tokens.json
 __pycache__/
 *.pyc
 .env
