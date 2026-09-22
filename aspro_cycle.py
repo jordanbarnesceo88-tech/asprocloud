@@ -91,15 +91,17 @@ def call(tok, module, entity, method, data=None, **params):
 
 
 def problem(body):
-    if isinstance(body, dict) and "error" in body:
-        e = body["error"]
-        if isinstance(e, dict):
-            return "{}|{}".format(e.get("error_code"), e.get("error_msg"))
-        detail = body.get("details") or body.get("description") or ""
-        if isinstance(detail, dict):
-            detail = json.dumps(detail, ensure_ascii=False)
-        return "{} {}".format(e, detail).strip()
-    return None
+    """Текст ошибки. Для validation error важны details — в них сервер
+    называет поле, которое не прошло проверку."""
+    if not isinstance(body, dict) or "error" not in body:
+        return None
+    e = body["error"]
+    head = "{}|{}".format(e.get("error_code"), e.get("error_msg")) \
+        if isinstance(e, dict) else str(e)
+    detail = body.get("details") or body.get("description") or ""
+    if isinstance(detail, (dict, list)):
+        detail = json.dumps(detail, ensure_ascii=False)
+    return "{} {}".format(head, detail).strip()
 
 
 def find_id(tok, module, entity, name, field="name"):
@@ -126,12 +128,27 @@ class Run:
         sign = {"ОК": "+", "ПРОПУСК": "·", "ОШИБКА": "!"}.get(status, " ")
         print("  {} {:<34} {}".format(sign, step, detail))
 
-    def make(self, tok, module, entity, payload, step, what):
+    def make(self, tok, module, entity, payload, step, what, minimal=None):
+        """minimal — урезанный набор полей. Если полный отвергнут, пробуем
+        его: так видно, ломает ли запрос одно из необязательных полей."""
         if not self.apply:
             self.note(step, "ПРОПУСК", "будет создано")
             return None
         body = call(tok, module, entity, "create", data=payload)
         bad = problem(body)
+        if bad and minimal:
+            self.note(step, "ОШИБКА", "{} — пробую минимальный набор".format(bad))
+            body = call(tok, module, entity, "create", data=minimal)
+            bad2 = problem(body)
+            if not bad2:
+                extra = sorted(set(payload) - set(minimal))
+                new_id = (body.get("response") or {}).get("id")
+                self.created.append([module, entity, new_id, what])
+                self.note(step + " (урезанный)", "ОК",
+                          "id {} — мешало одно из: {}".format(new_id, ", ".join(extra)))
+                return new_id
+            self.note(step + " (урезанный)", "ОШИБКА", bad2)
+            return None
         if bad:
             self.note(step, "ОШИБКА", bad)
             return None
@@ -215,7 +232,8 @@ def run_cycle(tok, me_id, org_id, run):
     # 2a. Привязка сделки к контрагенту
     if run.apply and lead_id and account_id:
         body = call(tok, "crm", "lead_accounts", "create",
-                    data={"lead_id": lead_id, "account_id": account_id})
+                    data={"lead_id": lead_id, "account_id": account_id,
+                          "account_type": 1})
         bad = problem(body)
         if bad:
             run.note("2a. Сделка ↔ контрагент", "ОШИБКА", bad)
@@ -236,7 +254,7 @@ def run_cycle(tok, me_id, org_id, run):
         "expire_date": (TODAY + datetime.timedelta(days=14)).isoformat(),
         "sub_total": SUM_NET,
         "total": SUM_NET,
-        "model": "crm", "model_id": lead_id or 0,
+        "module": "crm", "model": "leads", "model_id": lead_id or 0,
     }, "3. КП", "тестовое предложение")
 
     if estimate_id:
@@ -261,8 +279,14 @@ def run_cycle(tok, me_id, org_id, run):
         "status_id": 10,
         "category_id": ids.get("category") or 0,
         "estimate_id": estimate_id or 0,
-        "model": "crm", "model_id": lead_id or 0,
-    }, "4. Счёт", "тестовый счёт")
+        "manager_id": me_id,
+        "module": "crm", "model": "leads", "model_id": lead_id or 0,
+    }, "4. Счёт", "тестовый счёт", minimal={
+        "customer_id": account_id or 0,
+        "org_id": org_id,
+        "invoice_date": TODAY.isoformat(),
+        "total": SUM_NET,
+    })
 
     if invoice_id:
         run.make(tok, "fin", "invoice_item", {
