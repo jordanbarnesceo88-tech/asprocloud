@@ -51,7 +51,8 @@ TABLES = [
     ("Календари",                    "calendar", "calendar",    ["name"]),
     ("Контрагенты",                  "crm", "account",          ["name", "VAT", "type"]),
     ("Пользователи",                 "core", "user",            ["name", "username", "role_admin"]),
-    ("Пользовательские поля",        "customfields", "fields",  ["title", "type", "alias"]),
+    ("Наборы полей",                 "customfields", "fieldsets", ["name", "module", "model"]),
+    ("Пользовательские поля",        "customfields", "fields",  ["name", "module", "model", "type", "alias", "api_use_alias", "required", "formula"]),
 ]
 
 
